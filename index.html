@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EV Battery Monitor</title>
+<style>
+  :root{--bg:#0b1220;--card:#131c31;--text:#e8eefc;--mute:#8fa0c4;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--line:#24314f}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  header{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  h1{font-size:18px;margin:0}
+  .pill{font-size:12px;padding:4px 10px;border-radius:99px;background:var(--line);color:var(--mute)}
+  .pill.live{background:#14532d;color:#bbf7d0}
+  main{max-width:900px;margin:0 auto;padding:16px;display:grid;gap:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
+  .gaugeWrap{display:flex;flex-direction:column;align-items:center}
+  .pct{font-size:56px;font-weight:700;margin-top:-70px}
+  .status{margin-top:6px;font-weight:600}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .stat{background:#0f1830;border-radius:12px;padding:12px}
+  .stat small{color:var(--mute);display:block}
+  .stat b{font-size:22px}
+  #alert{display:none;padding:12px 16px;border-radius:12px;font-weight:600}
+  #alert.warn{display:block;background:#451a03;color:#fde68a;border:1px solid var(--warn)}
+  #alert.bad{display:block;background:#450a0a;color:#fecaca;border:1px solid var(--bad)}
+  label{font-size:13px;color:var(--mute);display:block;margin-bottom:4px}
+  select,input,button{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);background:#0f1830;color:var(--text);font-size:14px}
+  button{background:#2563eb;border:0;cursor:pointer;font-weight:600}
+  button.alt{background:#334155}
+  .form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+  canvas{width:100%;height:160px;display:block}
+  .note{font-size:12px;color:var(--mute);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ EV Battery Monitor</h1>
+  <span id="conn" class="pill">Not connected</span>
+</header>
+<main>
+  <div id="alert"></div>
+
+  <section class="card gaugeWrap">
+    <svg width="280" height="170" viewBox="0 0 280 170">
+      <path d="M30 150 A110 110 0 0 1 250 150" fill="none" stroke="#24314f" stroke-width="22" stroke-linecap="round"/>
+      <path id="arc" d="M30 150 A110 110 0 0 1 250 150" fill="none" stroke="#22c55e" stroke-width="22" stroke-linecap="round" stroke-dasharray="346" stroke-dashoffset="346"/>
+    </svg>
+    <div class="pct"><span id="pct">--</span><span style="font-size:24px">%</span></div>
+    <div id="status" class="status">Waiting for data...</div>
+  </section>
+
+  <section class="card grid">
+    <div class="stat"><small>Pack voltage</small><b id="volt">-- V</b></div>
+    <div class="stat"><small>Current</small><b id="amp">-- A</b></div>
+    <div class="stat"><small>Power</small><b id="pow">-- W</b></div>
+    <div class="stat"><small>Est. range</small><b id="range">-- km</b></div>
+  </section>
+
+  <section class="card">
+    <b>Battery % history</b>
+    <canvas id="chart" width="840" height="160"></canvas>
+  </section>
+
+  <section class="card">
+    <b>Settings</b>
+    <div class="form" style="margin-top:12px">
+      <div><label>Battery type</label>
+        <select id="type"><option value="li">Li-ion</option><option value="pb">Lead-acid</option></select></div>
+      <div><label>Pack voltage (nominal)</label>
+        <select id="nom"><option>24</option><option>36</option><option selected>48</option><option>60</option><option>72</option></select></div>
+      <div><label>Full-charge range (km)</label><input id="maxrange" type="number" value="80"></div>
+      <div><label>Low battery alert (%)</label><input id="lowAt" type="number" value="20"></div>
+      <div><label>ESP32 address</label><input id="ip" placeholder="192.168.4.1" value="192.168.4.1"></div>
+      <div><label>&nbsp;</label><button id="connect">Connect to ESP32</button></div>
+      <div><label>&nbsp;</label><button id="sim" class="alt">Run demo simulator</button></div>
+    </div>
+    <b style="display:block;margin-top:18px">🚗 Trip alerts</b>
+    <div class="form" style="margin-top:12px">
+      <div><label>Announce battery every (minutes)</label><input id="every" type="number" value="5" min="1"></div>
+      <div><label>Voice alerts</label><select id="voice"><option value="1" selected>On</option><option value="0">Off</option></select></div>
+      <div><label>&nbsp;</label><button id="trip" style="background:#16a34a">▶ Start trip</button></div>
+    </div>
+    <div class="note">Trip mode speaks the battery %, beeps, vibrates and sends notifications at 50, 40, 30, 20, 10 and 5%. It also warns if the sensor signal is lost. Keep this page open on the phone (the screen stays on during a trip) and turn the phone volume up.</div>
+    <div class="note">Open this file directly on your laptop/phone (not from an https site), connected to the ESP32's WiFi.</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// Voltage -> % curves (per cell) as [volts, percent]
+const LI = [[3.00,0],[3.30,5],[3.50,15],[3.60,25],[3.70,40],[3.80,55],[3.90,68],[4.00,80],[4.10,92],[4.20,100]];
+const PB = [[1.75,0],[1.95,20],[2.00,40],[2.03,60],[2.07,80],[2.12,100]]; // per 2V cell, approx at rest
+
+function interp(table, v){
+  if(v<=table[0][0]) return 0;
+  if(v>=table[table.length-1][0]) return 100;
+  for(let i=1;i<table.length;i++){
+    if(v<=table[i][0]){
+      const [v0,p0]=table[i-1],[v1,p1]=table[i];
+      return p0+(v-v0)*(p1-p0)/(v1-v0);
+    }
+  }
+}
+function cells(type, nom){
+  // Li-ion: 13S=48V, 16S=60V, 20S=72V, 10S=36V, 7S=24V ; Lead-acid: nominal/2 cells (2V each)
+  if(type==='li') return {24:7,36:10,48:13,60:16,72:20}[nom];
+  return nom/2;
+}
+function voltToPercent(v){
+  const type=$('type').value, nom=+$('nom').value;
+  const n=cells(type,nom);
+  return Math.round(interp(type==='li'?LI:PB, v/n));
+}
+
+const history=[]; let timer=null, simT=0;
+
+function update(volt, amp){
+  const pct=voltToPercent(volt);
+  const low=+$('lowAt').value;
+  $('pct').textContent=pct;
+  $('volt').textContent=volt.toFixed(1)+' V';
+  $('amp').textContent=amp.toFixed(1)+' A';
+  $('pow').textContent=Math.round(volt*amp)+' W';
+  $('range').textContent=Math.round(pct/100*(+$('maxrange').value))+' km';
+
+  const arc=$('arc');
+  arc.style.strokeDashoffset=346*(1-pct/100);
+  const color=pct<=10?'#ef4444':pct<=low?'#f59e0b':'#22c55e';
+  arc.style.stroke=color;
+
+  const a=$('alert'); a.className='';
+  if(pct<=10){a.className='bad';a.textContent='🚨 Critical battery! Stop and charge now.';$('status').textContent='Critical';}
+  else if(pct<=low){a.className='warn';a.textContent='⚠️ Low battery. Find a charging point.';$('status').textContent='Low';}
+  else if(amp>40){a.className='warn';a.textContent='⚠️ Very high current draw. Check load or motor.';$('status').textContent='High load';}
+  else {$('status').textContent=amp<-0.5?'Charging':'Healthy';}
+
+  history.push(pct); if(history.length>120) history.shift();
+  checkAlerts(pct,amp);
+  drawChart();
+}
+
+function drawChart(){
+  const c=$('chart'),x=c.getContext('2d'),w=c.width,h=c.height;
+  x.clearRect(0,0,w,h);
+  x.strokeStyle='#24314f';x.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=h*i/4;x.beginPath();x.moveTo(0,y);x.lineTo(w,y);x.stroke();}
+  if(history.length<2) return;
+  x.strokeStyle='#38bdf8';x.lineWidth=2.5;x.beginPath();
+  history.forEach((p,i)=>{
+    const px=i*(w/(120-1)), py=h-(p/100)*h;
+    i?x.lineTo(px,py):x.moveTo(px,py);
+  });
+  x.stroke();
+}
+
+// ---------- Trip alerts ----------
+let tripOn=false, wakeLock=null, audioCtx=null, lastAnnounce=0, fails=0, lostWarned=false;
+const spoken=new Set();
+const LEVELS=[50,40,30,20,10,5];
+
+function beep(n=1){
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    for(let i=0;i<n;i++){
+      const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+      o.connect(g);g.connect(audioCtx.destination);
+      o.frequency.value=880;g.gain.value=0.25;
+      o.start(audioCtx.currentTime+i*0.4);o.stop(audioCtx.currentTime+i*0.4+0.25);
+    }
+  }catch(e){}
+}
+function speak(msg){
+  if($('voice').value!=='1') return;
+  try{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(msg); u.lang='en-IN'; u.rate=0.95; speechSynthesis.speak(u);}catch(e){}
+}
+function notify(msg){
+  try{ if('Notification' in window && Notification.permission==='granted') new Notification('EV Battery',{body:msg}); }catch(e){}
+  if(navigator.vibrate) navigator.vibrate([300,150,300,150,300]);
+}
+function tripAlert(msg,urgent){ beep(urgent?3:1); setTimeout(()=>speak(msg),urgent?1300:400); notify(msg); }
+
+function checkAlerts(pct,amp){
+  if(!tripOn) return;
+  fails=0; lostWarned=false;
+  // threshold alerts (alert once for the lowest level just crossed)
+  const crossed=LEVELS.filter(l=>pct<=l && !spoken.has(l));
+  if(crossed.length){
+    const l=Math.min(...crossed);
+    LEVELS.filter(x=>x>=l).forEach(x=>spoken.add(x));
+    const km=Math.round(pct/100*(+$('maxrange').value));
+    tripAlert('Battery '+pct+' percent. About '+km+' kilometres left.'+(pct<=20?' Please find a charging point.':''), pct<=20);
+    lastAnnounce=Date.now();
+  }
+  // re-arm levels after charging
+  LEVELS.forEach(l=>{ if(pct>l+3) spoken.delete(l); });
+  // periodic announcement
+  const gap=Math.max(1,+$('every').value)*60000;
+  if(Date.now()-lastAnnounce>gap){
+    lastAnnounce=Date.now();
+    const km=Math.round(pct/100*(+$('maxrange').value));
+    speak('Battery '+pct+' percent. About '+km+' kilometres left.');
+  }
+  if(amp>40 && !spoken.has('hi')){ spoken.add('hi'); tripAlert('Very high current draw.',false); }
+  if(amp<=40) spoken.delete('hi');
+}
+function sensorLost(){
+  if(!tripOn) return;
+  fails++;
+  if(fails>=5 && !lostWarned){ lostWarned=true; tripAlert('Warning. Battery sensor signal lost.',true); }
+}
+async function keepAwake(){
+  try{ if('wakeLock' in navigator) wakeLock=await navigator.wakeLock.request('screen'); }catch(e){}
+}
+document.addEventListener('visibilitychange',()=>{ if(tripOn && document.visibilityState==='visible') keepAwake(); });
+
+$('trip').onclick=async()=>{
+  tripOn=!tripOn;
+  const b=$('trip');
+  if(tripOn){
+    spoken.clear(); lastAnnounce=Date.now(); fails=0; lostWarned=false;
+    b.textContent='■ Stop trip'; b.style.background='#dc2626';
+    try{ if('Notification' in window) await Notification.requestPermission(); }catch(e){}
+    await keepAwake(); beep(); speak('Trip started. Battery alerts are on.');
+  }else{
+    b.textContent='▶ Start trip'; b.style.background='#16a34a';
+    try{ wakeLock&&wakeLock.release(); }catch(e){}
+    speak('Trip stopped.');
+  }
+};
+
+function stop(){ if(timer){clearInterval(timer);timer=null;} }
+function setConn(t,live){ $('conn').textContent=t; $('conn').className='pill'+(live?' live':''); }
+
+$('connect').onclick=()=>{
+  stop(); const ip=$('ip').value.trim();
+  setConn('Connecting...',false);
+  timer=setInterval(async()=>{
+    try{
+      const r=await fetch('http://'+ip+'/data');
+      const d=await r.json();
+      update(d.voltage, d.current||0);
+      setConn('Live: '+ip,true);
+    }catch(e){ setConn('No signal from ESP32',false); sensorLost(); }
+  },1000);
+};
+
+$('sim').onclick=()=>{
+  stop(); simT=0; history.length=0; setConn('Demo simulator',true);
+  const type=$('type').value, nom=+$('nom').value, n=cells(type,nom);
+  const full=(type==='li'?4.2:2.12)*n, empty=(type==='li'?3.0:1.75)*n;
+  timer=setInterval(()=>{
+    simT+=1;
+    const v=full-(full-empty)*Math.min(simT/90,1);
+    const amp=12+Math.sin(simT/5)*8;
+    update(v,amp);
+    if(simT>95) simT=0;
+  },300);
+};
+drawChart();
+</script>
+</body>
+</html>
